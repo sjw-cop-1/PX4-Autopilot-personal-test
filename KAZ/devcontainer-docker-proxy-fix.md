@@ -1,7 +1,7 @@
 # Devcontainer 启动失败排查与修复说明
 
-**日期**：2026-03-29  
-**环境**：WSL2 (Ubuntu 22.04) + Docker Engine + VS Code Dev Containers  
+**日期**：2026-03-29
+**环境**：WSL2 (Ubuntu 22.04) + Docker Engine + VS Code Dev Containers
 **仓库**：PX4-Autopilot-personal-test
 
 ---
