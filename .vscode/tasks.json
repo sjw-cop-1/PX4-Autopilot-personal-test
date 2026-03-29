@@ -18,10 +18,7 @@
                 "kind": "build",
                 "isDefault": true,
             },
-            "problemMatcher": {
-                "base": "$gcc",
-                "fileLocation": ["relative", "${command:cmake.buildDirectory}"]
-            },
+            "problemMatcher": "$gcc",
             "presentation":{
                 "echo": false,
                 "showReuseMessage": false,

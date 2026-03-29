@@ -191,3 +191,170 @@ Dev Containers: Rebuild and Reopen in Container
 ```
 
 devcontainer 将直接使用本地缓存镜像构建，不再需要访问 Docker Hub。
+
+---
+
+## 七、容器内应用无法使用宿主代理（Copilot / curl 等 ECONNREFUSED）
+
+> **场景**：Docker daemon 已走代理可以拉取镜像，但容器启动后，容器内运行的应用（如 VS Code Copilot 扩展、curl、pip 等）试图通过 `127.0.0.1:29290` 访问代理时报 `ECONNREFUSED`。
+
+### 7.1 问题描述
+
+**现象**：
+
+```
+connect ECONNREFUSED 127.0.0.1:29290
+```
+
+WSL2 宿主机中可以正常连通代理（`nc -zv 127.0.0.1 29290` → `Connection succeeded`），但在 devcontainer 内执行同样命令则失败。
+
+**环境变量已正确传入容器**：
+
+```bash
+# 容器内
+echo $HTTP_PROXY   # http://127.0.0.1:29290  ← 已设置，但连不上
+```
+
+### 7.2 根因分析
+
+#### 网络拓扑对比
+
+```
+Windows 主机
+  └─ 代理进程 (Clash/V2Ray) 监听 0.0.0.0:29290
+
+WSL2（mirrored 网络模式）
+  └─ 127.0.0.1  ← 通过 WSL2 镜像网络映射到 Windows 的 loopback
+                   因此 WSL 内 127.0.0.1:29290 可访问 Windows 代理 ?
+
+Docker 容器（bridge 网络模式，默认）
+  └─ 127.0.0.1  ← 容器自身的 loopback，与宿主完全隔离
+                   访问 127.0.0.1:29290 → 容器内没有监听者 ?
+```
+
+| 位置 | `127.0.0.1` 指向 | `127.0.0.1:29290` 可达 |
+|------|-----------------|------------------------|
+| Windows | Windows loopback | ? 代理本身在此 |
+| WSL2 宿主 | 通过 mirrored 模式映射到 Windows loopback | ? |
+| Docker 容器（bridge） | 容器自身 loopback | ? |
+
+曾尝试的宿主 IP 均失败：
+
+```bash
+# 在容器内测试（均失败）
+nc -zv 172.17.0.1 29290   # Docker bridge 网关 ?
+nc -zv 192.168.0.4 29290  # WSL2 的以太网 IP  ?
+nc -zv 192.168.0.1 29290  # 路由器网关        ?
+```
+
+根本原因：Windows 代理绑定 `0.0.0.0:29290`，但 Windows 防火墙/路由配置下，这些 IP 路径对 Docker bridge 容器不通。
+
+#### WSL2 mirrored 网络模式的特殊性
+
+WSL2 开启 mirrored 模式（`.wslconfig` 中 `networkingMode=mirrored`）后：
+- WSL2 内 `127.0.0.1` = Windows loopback（镜像关系）
+- Docker 容器运行在 WSL2 内的 Docker Engine 上，但 **容器使用独立 bridge 网络**，不继承该镜像关系
+
+### 7.3 解决方案：`--network=host`
+
+让容器共享 WSL2 的网络栈，而非独立的 bridge 网络。
+
+```
+WSL2 网络栈（含 mirrored loopback → Windows 代理）
+  └─ 容器（--network=host，共享同一网络命名空间）
+       └─ 127.0.0.1:29290 → WSL2 mirrored → Windows 代理 ?
+```
+
+### 7.4 操作步骤
+
+#### 步骤 1：修改 `devcontainer.json`
+
+在 `.devcontainer/devcontainer.json` 的 `runArgs` 中添加 `--network=host`：
+
+```jsonc
+{
+  "runArgs": [
+    "--cap-add=SYS_PTRACE",
+    "--security-opt", "seccomp=unconfined",
+    "--network=host"          // ← 新增：共享 WSL2 网络栈
+  ],
+  // forwardPorts 与 --network=host 不兼容，须置空或删除
+  "forwardPorts": []
+}
+```
+
+> **注意**：`--network=host` 模式下容器与宿主共享所有端口，`forwardPorts` 配置无效且会报警告，需清空。
+
+#### 步骤 2：清理旧容器
+
+```bash
+# 查看正在运行的 devcontainer（名称通常含 vsc- 前缀）
+docker ps -a | grep vsc-
+
+# 强制删除旧容器（替换 <container_id> 为实际 ID）
+docker rm -f <container_id>
+```
+
+#### 步骤 3：重建容器
+
+在 VS Code 命令面板（`Ctrl+Shift+P`）执行：
+
+```
+Dev Containers: Rebuild and Reopen in Container
+```
+
+#### 步骤 4：验证代理可达性
+
+进入容器后，在终端执行：
+
+```bash
+# 方法 1：nc 测试 TCP 连通性
+nc -zv 127.0.0.1 29290
+# 期望输出：Connection to 127.0.0.1 29290 port [tcp/*] succeeded!
+
+# 方法 2：curl 通过代理访问外网
+curl -v --proxy http://127.0.0.1:29290 https://www.google.com -o /dev/null 2>&1 | head -5
+# 期望：HTTP/1.1 200 或 301（非 connection refused）
+```
+
+### 7.5 注意事项
+
+1. **端口冲突风险**：`--network=host` 让容器暴露所有端口到宿主，若容器内服务与宿主端口冲突需注意。
+
+2. **`forwardPorts` 必须清空**：
+   ```jsonc
+   "forwardPorts": []   // 不能有具体端口，否则 VS Code 会报错/警告
+   ```
+
+3. **此方案仅适用于 Linux/WSL2 Docker**：macOS 和 Windows 原生 Docker Desktop 不支持 `--network=host`（会静默忽略）。
+
+4. **代理工具须绑定 `0.0.0.0` 或 `127.0.0.1`**：本方案依赖 WSL2 的 mirrored 网络。若代理工具只监听 Windows 回环，WSL2 mirrored 模式下仍可路由；但若关闭 mirrored 模式（NAT 模式），则需改用其他方式。
+
+5. **确认 WSL2 处于 mirrored 网络模式**：
+
+   ```powershell
+   # Windows PowerShell 中查看
+   Get-Content "$env:USERPROFILE\.wslconfig"
+   # 期望包含：
+   # [wsl2]
+   # networkingMode=mirrored
+   ```
+
+### 7.6 当前生效配置（本仓库）
+
+**`.devcontainer/devcontainer.json`**（关键字段）：
+
+```jsonc
+{
+  "name": "px4-dev-nuttx",
+  "build": { "dockerfile": "Dockerfile", "context": ".." },
+  "runArgs": [
+    "--cap-add=SYS_PTRACE",
+    "--security-opt", "seccomp=unconfined",
+    "--network=host"
+  ],
+  "containerUser": "wrj",
+  "containerEnv": { "LOCAL_USER_ID": "${localEnv:UID}" },
+  "forwardPorts": []
+}
+```
