@@ -36,6 +36,7 @@ cmake_policy(SET CMP0057 NEW)
 
 include(px4_list_make_absolute)
 
+# 本地内置的 uORB 消息定义列表（.msg）
 set(msg_files
 	ActionRequest.msg
 	ActuatorArmed.msg
@@ -282,10 +283,14 @@ set(msg_files
 	versioned/VtolVehicleStatus.msg
 	versioned/Wind.msg
 )
+
+# 先排序，确保生成结果稳定（减少不同环境下的构建差异）
 list(SORT msg_files)
 
+# 将相对路径转换为绝对路径，便于后续生成脚本统一处理
 px4_list_make_absolute(msg_files ${CMAKE_CURRENT_SOURCE_DIR} ${msg_files})
 
+# 若存在外部模块目录，则将外部消息定义合并进来
 if(NOT EXTERNAL_MODULES_LOCATION STREQUAL "")
 	# Check that the msg directory and the CMakeLists.txt file exists
 	if(EXISTS ${EXTERNAL_MODULES_LOCATION}/msg/CMakeLists.txt)
@@ -299,10 +304,12 @@ if(NOT EXTERNAL_MODULES_LOCATION STREQUAL "")
 endif()
 
 # headers
+# 各类生成产物输出目录
 set(msg_out_path ${PX4_BINARY_DIR}/uORB/topics)
 set(ucdr_out_path ${PX4_BINARY_DIR}/uORB/ucdr)
 set(msg_source_out_path ${CMAKE_CURRENT_BINARY_DIR}/topics_sources)
 
+# 按消息名收集将要生成的头文件、源文件、ucdr 头、json 中间文件
 set(uorb_headers)
 set(uorb_sources)
 set(uorb_ucdr_headers)
@@ -322,9 +329,11 @@ foreach(msg_file ${msg_files})
 endforeach()
 
 # set parent scope msg_files for ROS
+# 导出到父作用域，供 ROS 相关构建逻辑复用
 set(msg_files ${msg_files} PARENT_SCOPE)
 
 # Generate uORB headers
+# 根据 .msg 生成 uORB 头文件与总览头
 add_custom_command(
 	OUTPUT
 		${uorb_headers}
@@ -347,6 +356,7 @@ add_custom_command(
 	)
 add_custom_target(uorb_headers DEPENDS ${uorb_headers})
 
+# 生成每个 topic 对应的 json 描述（用于后续字段压缩与元信息处理）
 add_custom_command(
 	OUTPUT
 		${uorb_json_files}
@@ -369,6 +379,7 @@ add_custom_target(uorb_json_files DEPENDS ${uorb_json_files})
 
 set(uorb_message_fields_cpp_file ${msg_source_out_path}/uORBMessageFieldsGenerated.cpp)
 set(uorb_message_fields_header_file ${msg_out_path}/uORBMessageFieldsGenerated.hpp)
+# 基于 json 生成压缩字段索引，供运行时高效查询消息字段
 add_custom_command(
 	OUTPUT
 		${uorb_message_fields_cpp_file}
@@ -386,6 +397,7 @@ add_custom_command(
 )
 
 # Generate microcdr headers
+# 生成 microCDR 序列化所需头文件
 add_custom_command(
 	OUTPUT ${uorb_ucdr_headers}
 	COMMAND ${PYTHON_EXECUTABLE} ${PX4_SOURCE_DIR}/Tools/msg/px_generate_uorb_topic_files.py
@@ -406,6 +418,7 @@ add_custom_command(
 add_custom_target(uorb_ucdr_headers DEPENDS ${uorb_ucdr_headers})
 
 # Generate uORB sources
+# 生成 uORB 源文件（每个 topic 的 cpp 以及 uORBTopics.cpp）
 add_custom_command(
 	OUTPUT
 		${uorb_sources}
@@ -427,11 +440,14 @@ add_custom_command(
 	VERBATIM
 	)
 
+# 最终消息库：聚合所有 uORB 头/源及字段元信息实现
 add_library(uorb_msgs ${uorb_headers} ${msg_out_path}/uORBTopics.hpp ${uorb_sources} ${msg_source_out_path}/uORBTopics.cpp ${uorb_message_fields_cpp_file})
 target_link_libraries(uorb_msgs PRIVATE m)
+# 先完成预构建与头文件生成，再构建消息库
 add_dependencies(uorb_msgs prebuild_targets uorb_headers)
 
 if(CONFIG_LIB_CDRSTREAM)
+	# CDRStream 分支：生成 IDL、RIHS01 哈希和 CDR 兼容头，用于 DDS/Zenoh 等场景
 	set(uorb_cdr_idl)
 	set(uorb_cdr_msg)
 	set(uorb_cdr_hash)
@@ -442,6 +458,7 @@ if(CONFIG_LIB_CDRSTREAM)
 	set(idl_uorb_path ${PX4_BINARY_DIR}/msg/px4/msg)
 
 	# Make sure that CycloneDDS has been checkout out
+	# 确保 cyclonedds 子模块已同步并拉取到位
 	execute_process(COMMAND git submodule sync src/lib/cdrstream/cyclonedds
 			WORKING_DIRECTORY ${PX4_SOURCE_DIR} )
 	execute_process(COMMAND git submodule update --init --force src/lib/cdrstream/cyclonedds
@@ -461,9 +478,11 @@ if(CONFIG_LIB_CDRSTREAM)
 			WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/idlc
 			RESULT_VARIABLE CMD_ERROR
 			OUTPUT_FILE CMD_OUTPUT )
+	# 将新构建的 idlc 加入程序搜索路径
 	list(APPEND CMAKE_PROGRAM_PATH "${CMAKE_CURRENT_BINARY_DIR}/idlc/bin")
 
 	# Copy .msg files
+	# 拷贝消息文件到 IDL 工作目录，同时登记衍生产物路径
 	foreach(msg_file ${msg_files})
 		get_filename_component(msg ${msg_file} NAME_WE)
 		configure_file(${msg_file} ${idl_out_path}/${msg}.msg COPYONLY)
@@ -489,6 +508,7 @@ if(CONFIG_LIB_CDRSTREAM)
 		VERBATIM
 		)
 
+	# 生成与 px4_msgs 命名兼容的符号链接，便于类型解析
 	file(CREATE_LINK ${idl_rihs01_out_path} ${idl_include_path}/px4_msgs SYMBOLIC)
 
 	# Generate IDL from .msg using rosidl_adapter
@@ -509,6 +529,7 @@ if(CONFIG_LIB_CDRSTREAM)
 		)
 
 	# Generate C definitions from IDL
+	# 将 IDL 编译为 C 层可用定义（带 cdrstream-desc 功能）
 	set(CYCLONEDDS_DIR ${PX4_SOURCE_DIR}/src/lib/cdrstream/cyclonedds)
 	include("${CYCLONEDDS_DIR}/cmake/Modules/Generate.cmake")
 	idlc_generate(TARGET uorb_cdrstream
@@ -548,10 +569,12 @@ if(CONFIG_LIB_CDRSTREAM)
 	add_dependencies(uorb_msgs uorb_idl_header)
 
 	# Compile all CDR compatible message defnitions
+	# 将 CDR 目标链接进 uorb_msgs，启用 CDR 兼容消息定义
 	target_link_libraries(uorb_msgs PRIVATE uorb_cdrstream )
 endif()
 
 if(CONFIG_MODULES_ZENOH)
+	# Zenoh 分支：先更新配置，再生成发布/订阅工厂代码
 	# Update kconfig file for topics
 	execute_process(COMMAND ${PYTHON_EXECUTABLE} ${PX4_SOURCE_DIR}/Tools/zenoh/px_generate_zenoh_topic_files.py
 			--zenoh-config

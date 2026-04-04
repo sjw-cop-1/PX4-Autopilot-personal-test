@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# 这是一份 POSIX/SITL 启动脚本：PX4 在仿真环境启动时会按顺序执行这里的命令。
+# 对零基础读者可按“从上到下”理解：先准备环境，再加载参数，再启动模块。
+
 # Un comment and use set +e to ignore and set -e to enable 'exit on error control'
 set +e
 # Un comment the line below to help debug scripts by printing a trace of the script commands
@@ -8,9 +11,11 @@ set +e
 # PX4 commands need the 'px4-' prefix in bash.
 # (px4-alias.sh is expected to be in the PATH)
 # shellcheck disable=SC1091
+# 加载别名后，可直接写 commander start，而不是手写 px4-commander start。
 . px4-alias.sh
 
 #search path for sourcing px4-rc.*
+# 把启动脚本目录加入 PATH，后续可以直接 . px4-rc.simulator 这种写法。
 PATH="$PATH:${R}etc/init.d-posix"
 
 #
@@ -19,6 +24,7 @@ PATH="$PATH:${R}etc/init.d-posix"
 
 # check for ekf2 replay
 # shellcheck disable=SC2154
+# 如果当前是 EKF2 回放模式，就走专用脚本并立即退出主启动流程。
 if [ "$replay_mode" = "ekf2" ]
 then
 	. ${R}etc/init.d-posix/rc.replay
@@ -26,6 +32,7 @@ then
 fi
 
 # initialize script variables
+# 先给关键变量默认值，避免未定义导致脚本分支行为不确定。
 set VEHICLE_TYPE                none
 set LOGGER_ARGS                 ""
 set LOGGER_BUF                  1000
@@ -34,6 +41,7 @@ set RUN_MINIMAL_SHELL           no
 
 set SYS_AUTOSTART=0
 
+# 根据环境变量/模型名决定本次要加载哪套机型配置（airframe）。
 if [ "$PX4_SIM_MODEL" = "shell" ]
 then
 	set RUN_MINIMAL_SHELL yes
@@ -46,12 +54,14 @@ then
 elif [ "$PX4_SIM_MODEL" = "none" ] || [ -z $PX4_SIM_MODEL ]
 then
 	# no airframe selected
+	# 未选择模型时不自动加载机型配置，保持最小状态。
 	SYS_AUTOSTART=0
 
 elif [ -n "$PX4_SIM_MODEL" ]
 then
 	# Find the matching Autostart ID (file name has the form: [0-9]+_${PX4_SIM_MODEL})
 	# TODO: unify with rc.autostart generation
+	# 通过文件名规则“数字_模型名”反查 autostart 编号。
 	# shellcheck disable=SC2012
 	REQUESTED_AUTOSTART=$(ls "${R}etc/init.d-posix/airframes" | sed -n 's/^\([0-9][0-9]*\)_'${PX4_SIM_MODEL}'$/\1/p')
 	if [ -z "$REQUESTED_AUTOSTART" ]; then
@@ -64,6 +74,7 @@ then
 fi
 
 # Load parameters
+# 参数文件是“系统配置持久化”的核心，启动时会先从磁盘导入。
 set PARAM_FILE parameters.bson
 set PARAM_BACKUP_FILE parameters_backup.bson
 
@@ -77,9 +88,11 @@ if [ -f $PARAM_FILE ]; then
 		bsondump $PARAM_FILE
 
 		# try to make a backup copy
+		# 主参数文件损坏时先留存现场，便于排查。
 		cp $PARAM_FILE param_import_fail.bson
 
 		# try importing from backup file
+		# 再尝试从备份参数恢复，尽量保证系统可启动。
 		if [ -f $PARAM_BACKUP_FILE ]
 		then
 			echo "[init] importing from parameter backup"
@@ -90,6 +103,7 @@ if [ -f $PARAM_FILE ]; then
 			param import $PARAM_BACKUP_FILE
 
 			# overwrite invalid $PARAM_FILE with backup
+			# 用备份覆盖损坏主文件，避免下次启动重复失败。
 			cp $PARAM_BACKUP_FILE $PARAM_FILE
 		fi
 
@@ -97,6 +111,7 @@ if [ -f $PARAM_FILE ]; then
 	fi
 
 elif [ -f $PARAM_BACKUP_FILE ]; then
+	# 主文件不存在但备份存在：退化到备份启动。
 	echo "ERROR [init] primary param file $PARAM_FILE unavailable, using backup $PARAM_BACKUP_FILE"
 	param import $PARAM_BACKUP_FILE
 fi
@@ -105,8 +120,11 @@ param select-backup $PARAM_BACKUP_FILE
 
 
 # exit early when the minimal shell is requested
+# 如果只想进入最小命令行（不启动飞控栈），在这里提前退出。
 [ $RUN_MINIMAL_SHELL = yes ] && exit 0
 
+# 判断是否需要自动重配（AUTOCNF）。
+# 一般当 SYS_AUTOSTART 变化时会触发，表示机型配置切换。
 if param compare SYS_AUTOSTART $SYS_AUTOSTART
 then
 	set AUTOCNF no
@@ -120,22 +138,28 @@ else
 fi
 
 # To trigger a parameter reset during boot SYS_AUTOCONFIG was set to 1 before
+# SYS_AUTOCONFIG>0 表示本次启动需要执行参数重置。
 if param greater SYS_AUTOCONFIG 0
 then
 	# Reset parameters except airframe, parameter version, sensor calibration, total flight time, flight UUID
+	# 保留关键信息（机型、版本、校准、飞行累计信息等），其余恢复默认。
 	param reset_all SYS_AUTOSTART SYS_PARAM_VER CAL_* LND_FLIGHT* TC_* COM_FLIGHT*
 	set AUTOCNF yes
 fi
 
 # multi-instance setup
 # shellcheck disable=SC2154
+# 多实例仿真时，每个实例使用独立系统 ID 和 DDS key，避免互相冲突。
 param set MAV_SYS_ID $((px4_instance+1))
 param set UXRCE_DDS_KEY $((px4_instance+1))
 
 if [ $AUTOCNF = yes ]
 then
+	# 写入 autostart 编号，确保机型配置与当前选择一致。
 	param set SYS_AUTOSTART $SYS_AUTOSTART
 
+	# 下面这些是仿真传感器的默认校准 ID 与优先级，
+	# 作用是让 SITL 启动后无需手工校准即可进入可用状态。
 	param set CAL_ACC0_ID  1310988 # 1310988: DRV_IMU_DEVTYPE_SIM, BUS: 1, ADDR: 1, TYPE: SIMULATION
 	param set CAL_GYRO0_ID 1310988 # 1310988: DRV_IMU_DEVTYPE_SIM, BUS: 1, ADDR: 1, TYPE: SIMULATION
 	param set CAL_ACC1_ID  1310996 # 1310996: DRV_IMU_DEVTYPE_SIM, BUS: 2, ADDR: 1, TYPE: SIMULATION
@@ -152,6 +176,8 @@ then
 	param set SENS_DPRES_OFF 0.001
 fi
 
+# 给电池、资源检查、RC 输入等参数设置“默认值”。
+# 注意：set-default 只在参数尚未显式设置时生效，不会强行覆盖用户已配置值。
 param set-default BAT1_N_CELLS 4
 
 # disable check, no CPU load reported on posix yet
@@ -186,6 +212,7 @@ param set-default UXRCE_DDS_AG_IP 2130706433  # 127.0.0.1
 
 
 # Adapt timeout parameters if simulation runs faster or slower than realtime.
+# 若仿真倍速不是 1.0，这里按倍速调整失联超时，避免“误判失联”。
 if [ -n "$PX4_SIM_SPEED_FACTOR" ]; then
 	COM_DL_LOSS_T_LONGER=$(echo "$PX4_SIM_SPEED_FACTOR * 10" | bc)
 	echo "COM_DL_LOSS_T set to $COM_DL_LOSS_T_LONGER"
@@ -205,6 +232,7 @@ if [ -n "$PX4_SIM_SPEED_FACTOR" ]; then
 fi
 
 # Autostart ID
+# 根据 SYS_AUTOSTART 在 airframes 目录中找到对应启动脚本。
 autostart_file=''
 # shellcheck disable=SC2231
 for f in ${R}etc/init.d-posix/airframes/"$(param show -q SYS_AUTOSTART)"_*
@@ -222,6 +250,7 @@ done
 
 if [ -e "$autostart_file" ]
 then
+	# 执行机型脚本：会设置机型类型、控制器参数、默认模块组合等。
 	. "$autostart_file"
 
 elif [ ! -e "$autostart_file" ] && [ "$SYS_AUTOSTART" -ne "0" ]
@@ -231,6 +260,7 @@ then
 fi
 
 # Allow overriding parameters via env variables: export PX4_PARAM_{name}={value}
+# 允许用环境变量临时覆盖参数，便于自动化测试与脚本化注入配置。
 env | while IFS='=' read -r line; do
   value=${line#*=}
   name=${line%%=*}
@@ -239,14 +269,17 @@ env | while IFS='=' read -r line; do
   esac
 done
 
+# 启动数据管理模块（任务、航点、任务状态等持久化数据）。
 dataman start
 
 # only start the simulator if not in replay mode, as both control the lockstep time
+# 回放模式和仿真器都会控制时间步进，二者不能同时主导时间。
 if ! replay tryapplyparams
 then
 	. px4-rc.simulator
 fi
 
+# 下面开始拉起系统核心模块，顺序大体是：监控/电源/输入/传感器/状态机。
 load_mon start
 
 if param compare SIM_BAT_ENABLE 1
@@ -264,6 +297,7 @@ commander start
 
 #
 # state estimator selection
+# 状态估计器按参数开关启动：EKF2、LPE、姿态估计可以独立控制。
 if param compare -s EKF2_EN 1
 then
 	ekf2 start &
@@ -281,17 +315,20 @@ fi
 
 if ! pwm_out_sim start -m sim
 then
+	# PWM 仿真输出启动失败时播放错误音，便于快速定位问题。
 	tune_control play error
 fi
 
 #
 # Configure vehicle type specific parameters.
 # Note: rc.vehicle_setup is the entry point for all vehicle type specific setup.
+# 进入机型级二次配置入口（固定翼/多旋翼/车船等差异化设置）。
 . ${R}etc/init.d/rc.vehicle_setup
 
 navigator start
 
 # Try to start the UXRCE-DDS Client with UDP transport if module exists
+# 配置 UXRCE-DDS 命名空间：多实例时默认使用 px4_实例号。
 uxrce_dds_ns=""
 if [ "$px4_instance" -ne "0" ]
 then
@@ -311,6 +348,7 @@ fi
 if [ -n "$ROS_DOMAIN_ID" ]
 then
 	# Match UXRCE_DDS_DOM_ID with ROS_DOMAIN_ID, if defined
+	# 与 ROS2 域 ID 对齐，保证 DDS 发现与通信在同一域中。
 	param set UXRCE_DDS_DOM_ID $ROS_DOMAIN_ID
 else
 	param set UXRCE_DDS_DOM_ID 0
@@ -322,10 +360,12 @@ then
 	uxrce_dds_port="$PX4_UXRCE_DDS_PORT"
 fi
 
+# 启动 UXRCE-DDS 客户端（UDP），把 PX4 话题桥接到 DDS 世界。
 uxrce_dds_client start -t udp -p $uxrce_dds_port $uxrce_dds_ns
 
 if param greater -s ZENOH_ENABLE 0
 then
+	# 若启用 Zenoh，则拉起 Zenoh 桥接模块。
 	zenoh start
 fi
 
@@ -336,6 +376,7 @@ fi
 
 if param greater -s TRIG_MODE 0
 then
+	# 相机触发链：触发器负责出发信号，反馈模块负责记录回执时间等信息。
 	camera_trigger start
 	camera_feedback start
 fi
@@ -358,12 +399,15 @@ then
 fi
 
 #user defined mavlink streams for instances can be in PATH
+# 启动 Mavlink 链路（遥测、地面站、伴飞计算机通信都依赖它）。
 . px4-rc.mavlink
 
 # execute autostart post script if any
+# 若机型提供了 .post 脚本，在所有基础模块起来后再执行。
 [ -e "$autostart_file".post ] && . "$autostart_file".post
 
 # Run script to start logging
+# 根据估计器类型选择额外日志主题，确保后处理分析有关键数据。
 if param compare -s EKF2_EN 1
 then
 	set LOGGER_ARGS "-p ekf2_timestamps"
@@ -372,5 +416,6 @@ else
 fi
 . ${R}etc/init.d/rc.logging
 
+# 通知外部“启动完成”，并在需要时进入回放启动流程。
 mavlink boot_complete
 replay trystart
