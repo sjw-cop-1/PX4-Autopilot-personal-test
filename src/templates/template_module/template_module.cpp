@@ -45,6 +45,7 @@ ModuleBase::Descriptor TemplateModule::desc{task_spawn, custom_command, print_us
 int TemplateModule::print_status()
 {
 	PX4_INFO("Running");
+	// TODO: 打印模块运行时的更多状态信息，便于调试与观测
 	// TODO: print additional runtime information about the state of the module
 
 	return 0;
@@ -52,6 +53,7 @@ int TemplateModule::print_status()
 
 int TemplateModule::custom_command(int argc, char *argv[])
 {
+	// 这里可以扩展自定义 CLI 子命令，默认模板未启用具体功能
 	/*
 	if (!is_running(desc)) {
 		print_usage("not running");
@@ -78,6 +80,7 @@ int TemplateModule::run_trampoline(int argc, char *argv[])
 
 int TemplateModule::task_spawn(int argc, char *argv[])
 {
+	// 启动独立任务线程，入口为 run_trampoline
 	desc.task_id = px4_task_spawn_cmd("module",
 					  SCHED_DEFAULT,
 					  SCHED_PRIORITY_DEFAULT,
@@ -95,6 +98,7 @@ int TemplateModule::task_spawn(int argc, char *argv[])
 
 TemplateModule *TemplateModule::instantiate(int argc, char *argv[])
 {
+	// 示例参数与开关，展示如何从命令行传入配置
 	int example_param = 0;
 	bool example_flag = false;
 	bool error_flag = false;
@@ -103,7 +107,9 @@ TemplateModule *TemplateModule::instantiate(int argc, char *argv[])
 	int ch;
 	const char *myoptarg = nullptr;
 
-	// parse CLI arguments
+	// 解析 CLI 参数
+	// -p <value>：示例整型参数
+	// -f：示例布尔开关
 	while ((ch = px4_getopt(argc, argv, "p:f", &myoptind, &myoptarg)) != EOF) {
 		switch (ch) {
 		case 'p':
@@ -126,12 +132,14 @@ TemplateModule *TemplateModule::instantiate(int argc, char *argv[])
 	}
 
 	if (error_flag) {
+		// 参数非法时返回空指针，框架会据此判定启动失败
 		return nullptr;
 	}
 
 	TemplateModule *instance = new TemplateModule(example_param, example_flag);
 
 	if (instance == nullptr) {
+		// 内存分配失败时记录错误日志
 		PX4_ERR("alloc failed");
 	}
 
@@ -145,6 +153,7 @@ TemplateModule::TemplateModule(int example_param, bool example_flag)
 
 void TemplateModule::run()
 {
+	// 示例：通过订阅 sensor_combined，将主循环与传感器发布节奏同步
 	// Example: run the loop synchronized to the sensor_combined topic publication
 	int sensor_combined_sub = orb_subscribe(ORB_ID(sensor_combined));
 
@@ -152,18 +161,20 @@ void TemplateModule::run()
 	fds[0].fd = sensor_combined_sub;
 	fds[0].events = POLLIN;
 
-	// initialize parameters
+	// 初始化参数，首次进入时强制拉取一次
 	parameters_update(true);
 
 	while (!should_exit()) {
 
-		// wait for up to 1000ms for data
+		// 最多等待 1000ms 新数据到达
 		int pret = px4_poll(fds, (sizeof(fds) / sizeof(fds[0])), 1000);
 
 		if (pret == 0) {
+			// 超时不退出循环，允许模块继续执行周期性逻辑
 			// Timeout: let the loop run anyway, don't do `continue` here
 
 		} else if (pret < 0) {
+			// poll 出错时短暂休眠，避免错误状态下忙等
 			// this is undesirable but not much we can do
 			PX4_ERR("poll error %d, %d", pret, errno);
 			px4_usleep(50000);
@@ -173,10 +184,12 @@ void TemplateModule::run()
 
 			struct sensor_combined_s sensor_combined;
 			orb_copy(ORB_ID(sensor_combined), sensor_combined_sub, &sensor_combined);
+			// 在此处理新到达的传感器数据
 			// TODO: do something with the data...
 
 		}
 
+		// 周期性检查参数更新，支持运行时调参
 		parameters_update();
 	}
 
@@ -185,12 +198,15 @@ void TemplateModule::run()
 
 void TemplateModule::parameters_update(bool force)
 {
+	// 检查参数是否更新；force=true 时无条件更新一次
 	// check for parameter updates
 	if (_parameter_update_sub.updated() || force) {
+		// 读取并清除参数更新通知
 		// clear update
 		parameter_update_s update;
 		_parameter_update_sub.copy(&update);
 
+		// 从参数系统同步到当前模块成员
 		// update parameters from storage
 		updateParams();
 	}
